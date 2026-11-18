@@ -1,0 +1,68 @@
+# The only file of the repository of the gift sites (kit/tools/deploy.mjs puts it there). The site itself is never
+# committed: deploy.mjs uploads it as a tar to a draft release of this repository (drafts are seen only by the owner),
+# starts this workflow, and deletes the draft and the artifact once the run is over.
+# Two jobs, as actions/deploy-pages expects: in one job the deployment may look for the artifact before it is listed.
+name: pages
+run-name: pages ${{ inputs.nonce }}
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: draft release id
+        required: true
+      sha256:
+        description: sha256 of site.tar
+        required: true
+      nonce:
+        description: run name
+        required: true
+permissions: {}
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # a draft release is visible only with write access
+    steps:
+      - name: Fetch the site from the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REL: ${{ inputs.release }}
+          SUM: ${{ inputs.sha256 }}
+        run: |
+          set -eu
+          id=$(gh api "repos/$REPO/releases/$REL" --jq '[.assets[] | select(.name == "site.tar")][0].id')
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o site.tar "https://api.github.com/repos/$REPO/releases/assets/$id"
+          echo "$SUM  site.tar" | sha256sum -c --quiet
+          mkdir _site
+          tar -xf site.tar -C _site --no-same-owner --no-same-permissions
+          if [ -n "$(find _site -type l)" ]; then echo "links in the site"; exit 1; fi
+          extra=$(cd _site && find . -mindepth 1 ! -type d | sed 's|^\./||' | grep -Ev '^(index\.html|[a-z0-9]+/(index\.html|sw\.js|manifest\.webmanifest|icon\.svg|fonts/[A-Za-z0-9_-]+\.woff2|c/[0-9a-f]{20}\.bin))$' || true)
+          if [ -n "$extra" ]; then echo "unexpected files in the site: $(printf '%s\n' "$extra" | wc -l)"; exit 1; fi
+          echo "files: $(find _site -type f | wc -l)"
+          tar --dereference --hard-dereference --directory _site -cf "$RUNNER_TEMP/artifact.tar" .
+      - name: Upload the Pages artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0, as actions/upload-pages-artifact v5.0.0
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
